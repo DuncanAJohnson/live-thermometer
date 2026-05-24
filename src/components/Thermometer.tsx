@@ -1,26 +1,65 @@
 import { useEffect, useState } from 'react'
 import type { Unit } from '../lib/types'
 
-const MIN_C = -40
-const MAX_C = 50
+// Default visible scale in Celsius. The °F display reuses the same physical
+// extent so the mercury level doesn't shift when switching units — F labels
+// are placed at multiples of 20 °F that fall inside the F-equivalent range.
+// The C range is expanded automatically when the current temperature falls
+// outside the default, so there's always at least one labelled C tick beyond
+// the temp (which also pulls the F-equivalent range out far enough to expose
+// the next F label).
+const DEFAULT_CMIN = -30
+const DEFAULT_CMAX = 40
 
-// Tick values shown in the active unit. Positions on the tube are computed
-// from each label's celsius equivalent, so the tick spacing stays correct
-// against the underlying −40…50 °C scale.
-const TICK_LABELS_C = [-40, -30, -20, -10, 0, 10, 20, 30, 40, 50]
-const TICK_LABELS_F = [-40, -20, 0, 20, 40, 60, 80, 100, 120]
+function computeScaleRange(celsius: number): { cMin: number; cMax: number } {
+  let cMin = DEFAULT_CMIN
+  let cMax = DEFAULT_CMAX
+  if (celsius < cMin) cMin = Math.floor(celsius / 10) * 10
+  if (celsius > cMax) cMax = Math.ceil(celsius / 10) * 10
+  return { cMin, cMax }
+}
 
-function minorTicks(unit: Unit, zoomed: boolean): { medium: number[]; small: number[] } {
+function cToF(c: number): number {
+  return c * 1.8 + 32
+}
+
+function fToC(f: number): number {
+  return (f - 32) / 1.8
+}
+
+function tickLabelsFor(unit: Unit, cMin: number, cMax: number): number[] {
+  const labels: number[] = []
+  if (unit === 'C') {
+    for (let v = cMin; v <= cMax; v += 10) labels.push(v)
+    return labels
+  }
+  const fMin = cToF(cMin)
+  const fMax = cToF(cMax)
+  const first = Math.ceil(fMin / 20) * 20
+  for (let f = first; f <= fMax + 1e-9; f += 20) labels.push(f)
+  return labels
+}
+
+function minorTicks(
+  unit: Unit,
+  zoomed: boolean,
+  cMin: number,
+  cMax: number,
+): { medium: number[]; small: number[] } {
   const medium: number[] = []
   const small: number[] = []
   if (unit === 'F') {
+    const fMin = cToF(cMin)
+    const fMax = cToF(cMax)
     // Zoomed out: 5° medium ticks between the 20° labels.
     // Zoomed in:  5° medium + 1° small ticks.
-    for (let f = -40; f <= 120; f += 5) {
+    const mediumStart = Math.ceil(fMin / 5) * 5
+    for (let f = mediumStart; f <= fMax + 1e-9; f += 5) {
       if (f % 20 !== 0) medium.push(f)
     }
     if (zoomed) {
-      for (let f = -40; f <= 120; f += 1) {
+      const smallStart = Math.ceil(fMin)
+      for (let f = smallStart; f <= fMax + 1e-9; f += 1) {
         if (f % 5 !== 0) small.push(f)
       }
     }
@@ -29,27 +68,18 @@ function minorTicks(unit: Unit, zoomed: boolean): { medium: number[]; small: num
   // Celsius — zoomed out: 2° medium ticks between the 10° labels.
   // Zoomed in: 5° medium + 1° small ticks.
   if (zoomed) {
-    for (let c = -40; c <= 50; c += 5) {
+    for (let c = cMin; c <= cMax; c += 5) {
       if (c % 10 !== 0) medium.push(c)
     }
-    for (let c = -40; c <= 50; c += 1) {
+    for (let c = cMin; c <= cMax; c += 1) {
       if (c % 5 !== 0) small.push(c)
     }
   } else {
-    for (let c = -40; c <= 50; c += 2) {
+    for (let c = cMin; c <= cMax; c += 2) {
       if (c % 10 !== 0) medium.push(c)
     }
   }
   return { medium, small }
-}
-
-function toCelsius(value: number, unit: Unit): number {
-  return unit === 'F' ? ((value - 32) * 5) / 9 : value
-}
-
-function ratioFor(celsius: number): number {
-  const clamped = Math.max(MIN_C, Math.min(MAX_C, celsius))
-  return (clamped - MIN_C) / (MAX_C - MIN_C)
 }
 
 function ThermometerSvg({
@@ -63,13 +93,15 @@ function ThermometerSvg({
   height: number | string
   zoomed?: boolean
 }) {
-  const fill = ratioFor(celsius)
+  const { cMin, cMax } = computeScaleRange(celsius)
+  const fill = Math.max(0, Math.min(1, (celsius - cMin) / (cMax - cMin)))
+
   const tubeTop = 20
   const tubeBottom = 240
   // Visual extensions of the outer tube. Tick math still uses tubeTop /
-  // tubeBottom so the scale stays at the top of the bulb and tops out at 50°C.
-  // outerTubeTop adds a small expansion chamber above the highest tick;
-  // outerTubeBottom blends the column into the bulb.
+  // tubeBottom so the scale stays at the top of the bulb and tops out at the
+  // highest visible tick. outerTubeTop adds a small expansion chamber above
+  // the top tick; outerTubeBottom blends the column into the bulb.
   const outerTubeTop = 8
   const outerTubeBottom = 260
   const tubeHeight = tubeBottom - tubeTop
@@ -79,8 +111,15 @@ function ThermometerSvg({
   const mercuryLeft = 41
   const mercuryWidth = 18
   const bulbMercuryR = 21
-  const labels = unit === 'F' ? TICK_LABELS_F : TICK_LABELS_C
-  const { medium, small } = minorTicks(unit, zoomed)
+  const labels = tickLabelsFor(unit, cMin, cMax)
+  const { medium, small } = minorTicks(unit, zoomed, cMin, cMax)
+  // Position any value (in the active unit) on the tube. F values get
+  // converted to C first so positions track the canonical C scale.
+  const yFor = (value: number): number => {
+    const c = unit === 'F' ? fToC(value) : value
+    const r = Math.max(0, Math.min(1, (c - cMin) / (cMax - cMin)))
+    return tubeBottom - tubeHeight * r
+  }
 
   return (
     <svg
@@ -124,7 +163,7 @@ function ThermometerSvg({
       </g>
 
       {small.map((value) => {
-        const y = tubeBottom - tubeHeight * ratioFor(toCelsius(value, unit))
+        const y = yFor(value)
         return (
           <line
             key={`s-${value}`}
@@ -139,7 +178,7 @@ function ThermometerSvg({
       })}
 
       {medium.map((value) => {
-        const y = tubeBottom - tubeHeight * ratioFor(toCelsius(value, unit))
+        const y = yFor(value)
         return (
           <line
             key={`m-${value}`}
@@ -154,8 +193,7 @@ function ThermometerSvg({
       })}
 
       {labels.map((label) => {
-        const labelC = toCelsius(label, unit)
-        const y = tubeBottom - tubeHeight * ratioFor(labelC)
+        const y = yFor(label)
         return (
           <g key={label}>
             <line x1="61" x2="70" y1={y} y2={y} stroke="#475569" strokeWidth="1.5" />
